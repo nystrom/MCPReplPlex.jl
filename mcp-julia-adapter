@@ -2,13 +2,18 @@
 """
 MCP Julia REPL Adapter
 
-This adapter bridges stdin/stdout MCP clients to the Unix socket-based Julia MCP server.
-It reads JSON-RPC messages from stdin and forwards them to the socket,
-then returns responses to stdout.
+This adapter bridges stdio/HTTP MCP clients to the Unix socket-based Julia MCP server.
+It reads JSON-RPC messages from stdin or HTTP and forwards them to the socket,
+then returns responses.
 
 Usage:
-    ./mcp-julia-adapter [project_dir]
+    ./mcp-julia-adapter [options] [project_dir]
 
+Options:
+    --transport stdio|http    Transport mode (default: stdio)
+    --port PORT               Port for HTTP mode (default: 3000)
+
+Arguments:
     project_dir: Optional directory to start searching for .mcp-repl.sock.
                  If not specified, uses current working directory.
 
@@ -16,17 +21,20 @@ The Julia MCP server must be running first:
     julia --project -e "using MCPRepl; MCPRepl.start!()"
 """
 
+import argparse
 import json
 import os
 import signal
 import socket
 import sys
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from typing import Optional
 
 SOCKET_NAME = ".mcp-repl.sock"
 PID_NAME = ".mcp-repl.pid"
 
 
-def find_socket_path(start_dir: str) -> str | None:
+def find_socket_path(start_dir: str) -> Optional[str]:
     """
     Walk up the directory tree from start_dir looking for .mcp-repl.sock.
     Returns the socket path if found, None otherwise.
@@ -55,7 +63,6 @@ def check_server_running(socket_path: str) -> bool:
     try:
         with open(pid_path, 'r') as f:
             pid = int(f.read().strip())
-        # Check if process exists (signal 0 tests existence)
         os.kill(pid, 0)
         return True
     except (ValueError, ProcessLookupError, PermissionError, FileNotFoundError):
@@ -74,21 +81,197 @@ def create_error_response(request_id, code: int, message: str) -> dict:
     }
 
 
+def connect_to_socket(socket_path: str):
+    """Connect to the Unix socket and return a socket object."""
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.connect(socket_path)
+    return sock
+
+
+def forward_request(sock_file, request: dict) -> dict:
+    """Forward a request to the Julia server and return the response."""
+    sock_file.write((json.dumps(request) + '\n').encode('utf-8'))
+    sock_file.flush()
+
+    response_line = sock_file.readline()
+    if not response_line:
+        raise ConnectionError("Server closed connection")
+
+    return json.loads(response_line.decode('utf-8'))
+
+
+class MCPHTTPHandler(BaseHTTPRequestHandler):
+    """HTTP handler for MCP requests."""
+
+    socket_path: str = None
+    sock_file = None
+
+    def log_message(self, format, *args):
+        """Suppress HTTP server logging."""
+        pass
+
+    def send_json_response(self, response: dict, status: int = 200):
+        """Send a JSON response."""
+        response_body = json.dumps(response).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(response_body)))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(response_body)
+
+    def do_OPTIONS(self):
+        """Handle CORS preflight requests."""
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def do_GET(self):
+        """Handle GET requests (for health checks)."""
+        if self.path == '/health':
+            self.send_json_response({"status": "ok"})
+        else:
+            self.send_json_response(
+                create_error_response(None, -32600, "Use POST for JSON-RPC requests"),
+                400
+            )
+
+    def do_POST(self):
+        """Handle POST requests with JSON-RPC."""
+        request_id = None
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                self.send_json_response(
+                    create_error_response(None, -32600, "Empty request body"),
+                    400
+                )
+                return
+
+            body = self.rfile.read(content_length).decode('utf-8')
+            request = json.loads(body)
+            request_id = request.get("id")
+
+            # Connect to socket if not already connected
+            if self.sock_file is None or self.sock_file.closed:
+                sock = connect_to_socket(self.socket_path)
+                self.sock_file = sock.makefile('rwb')
+
+            # Forward request and get response
+            result = forward_request(self.sock_file, request)
+            self.send_json_response(result)
+
+        except json.JSONDecodeError as e:
+            self.send_json_response(
+                create_error_response(request_id, -32700, f"Parse error: {e}"),
+                400
+            )
+        except socket.error as e:
+            self.send_json_response(
+                create_error_response(request_id, -32603, f"Socket error: {e}"),
+                500
+            )
+        except Exception as e:
+            self.send_json_response(
+                create_error_response(request_id, -32603, f"Internal error: {e}"),
+                500
+            )
+
+
+def run_stdio_mode(socket_path: str):
+    """Run in stdio mode - read from stdin, write to stdout."""
+    sock = connect_to_socket(socket_path)
+    sock_file = sock.makefile('rwb')
+
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+
+            request_id = None
+            try:
+                request = json.loads(line)
+                request_id = request.get("id")
+
+                result = forward_request(sock_file, request)
+                print(json.dumps(result), flush=True)
+
+            except json.JSONDecodeError as e:
+                print(json.dumps(create_error_response(request_id, -32700, f"Parse error: {e}")), flush=True)
+
+            except socket.error as e:
+                error_msg = f"Socket error: {e}. Is the Julia MCP server still running?"
+                print(json.dumps(create_error_response(request_id, -32603, error_msg)), flush=True)
+                break
+
+            except Exception as e:
+                print(json.dumps(create_error_response(request_id, -32603, f"Internal error: {e}")), flush=True)
+
+    finally:
+        try:
+            sock_file.close()
+            sock.close()
+        except:
+            pass
+
+
+def run_http_mode(socket_path: str, port: int):
+    """Run in HTTP mode - serve HTTP requests."""
+    MCPHTTPHandler.socket_path = socket_path
+
+    server = HTTPServer(('localhost', port), MCPHTTPHandler)
+    print(f"MCP HTTP adapter running on http://localhost:{port}", file=sys.stderr)
+    print(f"Forwarding to Julia MCP server at {socket_path}", file=sys.stderr)
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down HTTP server", file=sys.stderr)
+    finally:
+        server.shutdown()
+
+
 def main():
-    """Main adapter loop - reads stdin, forwards to Unix socket, writes to stdout"""
-    # Determine start directory from argument or cwd
-    start_dir = sys.argv[1] if len(sys.argv) > 1 else os.getcwd()
+    """Main entry point."""
+    parser = argparse.ArgumentParser(
+        description='MCP Julia REPL Adapter - bridges stdio/HTTP to Unix socket'
+    )
+    parser.add_argument(
+        '--transport',
+        choices=['stdio', 'http'],
+        default='stdio',
+        help='Transport mode (default: stdio)'
+    )
+    parser.add_argument(
+        '--port',
+        type=int,
+        default=3000,
+        help='Port for HTTP mode (default: 3000)'
+    )
+    parser.add_argument(
+        'project_dir',
+        nargs='?',
+        default=os.getcwd(),
+        help='Directory to start searching for .mcp-repl.sock (default: cwd)'
+    )
+
+    args = parser.parse_args()
 
     # Find socket
-    socket_path = find_socket_path(start_dir)
+    socket_path = find_socket_path(args.project_dir)
 
     if socket_path is None:
         error_msg = (
             "MCP REPL server not found. Start the server with:\n"
             "  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
         )
-        # Print error to stderr for debugging, but also need to handle JSON-RPC properly
-        print(json.dumps(create_error_response(None, -32603, error_msg)), flush=True)
+        if args.transport == 'stdio':
+            print(json.dumps(create_error_response(None, -32603, error_msg)), flush=True)
+        else:
+            print(error_msg, file=sys.stderr)
         sys.exit(1)
 
     if not check_server_running(socket_path):
@@ -96,64 +279,17 @@ def main():
             f"MCP REPL server not running (socket exists but process dead). Start the server with:\n"
             f"  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
         )
-        print(json.dumps(create_error_response(None, -32603, error_msg)), flush=True)
+        if args.transport == 'stdio':
+            print(json.dumps(create_error_response(None, -32603, error_msg)), flush=True)
+        else:
+            print(error_msg, file=sys.stderr)
         sys.exit(1)
 
-    # Connect to Unix socket
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    try:
-        sock.connect(socket_path)
-    except socket.error as e:
-        error_msg = f"Failed to connect to socket {socket_path}: {e}"
-        print(json.dumps(create_error_response(None, -32603, error_msg)), flush=True)
-        sys.exit(1)
-
-    # Create file objects for socket I/O
-    sock_file = sock.makefile('rwb')
-
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-
-        request_id = None
-        try:
-            # Parse JSON-RPC request from stdin
-            request = json.loads(line)
-            request_id = request.get("id")
-
-            # Send to socket (line-delimited JSON)
-            sock_file.write((json.dumps(request) + '\n').encode('utf-8'))
-            sock_file.flush()
-
-            # Read response from socket
-            response_line = sock_file.readline()
-            if not response_line:
-                # Socket closed
-                error_msg = "Server closed connection"
-                print(json.dumps(create_error_response(request_id, -32603, error_msg)), flush=True)
-                break
-
-            result = json.loads(response_line.decode('utf-8'))
-            print(json.dumps(result), flush=True)
-
-        except json.JSONDecodeError as e:
-            print(json.dumps(create_error_response(request_id, -32700, f"Parse error: {e}")), flush=True)
-
-        except socket.error as e:
-            error_msg = f"Socket error: {e}. Is the Julia MCP server still running?"
-            print(json.dumps(create_error_response(request_id, -32603, error_msg)), flush=True)
-            break
-
-        except Exception as e:
-            print(json.dumps(create_error_response(request_id, -32603, f"Internal error: {e}")), flush=True)
-
-    # Cleanup
-    try:
-        sock_file.close()
-        sock.close()
-    except:
-        pass
+    # Run in appropriate mode
+    if args.transport == 'stdio':
+        run_stdio_mode(socket_path)
+    else:
+        run_http_mode(socket_path, args.port)
 
 
 if __name__ == "__main__":

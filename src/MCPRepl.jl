@@ -24,68 +24,68 @@ function get_project_dir()
 end
 
 """
-    get_socket_path()
+    get_socket_path(socket_dir::String=get_project_dir())
 
-Returns the path to the Unix socket file in the project directory.
+Returns the path to the Unix socket file in the specified directory.
 """
-function get_socket_path()
-    return joinpath(get_project_dir(), SOCKET_NAME)
+function get_socket_path(socket_dir::String=get_project_dir())
+    return joinpath(socket_dir, SOCKET_NAME)
 end
 
 """
-    get_pid_path()
+    get_pid_path(socket_dir::String=get_project_dir())
 
-Returns the path to the PID file in the project directory.
+Returns the path to the PID file in the specified directory.
 """
-function get_pid_path()
-    return joinpath(get_project_dir(), PID_NAME)
+function get_pid_path(socket_dir::String=get_project_dir())
+    return joinpath(socket_dir, PID_NAME)
 end
 
 """
-    write_pid_file()
+    write_pid_file(socket_dir::String=get_project_dir())
 
 Writes the current process PID to the PID file.
 """
-function write_pid_file()
-    write(get_pid_path(), string(getpid()))
+function write_pid_file(socket_dir::String=get_project_dir())
+    write(get_pid_path(socket_dir), string(getpid()))
     return nothing
 end
 
 """
-    remove_pid_file()
+    remove_pid_file(socket_dir::String=get_project_dir())
 
 Removes the PID file if it exists.
 """
-function remove_pid_file()
-    pid_path = get_pid_path()
+function remove_pid_file(socket_dir::String=get_project_dir())
+    pid_path = get_pid_path(socket_dir)
     isfile(pid_path) && rm(pid_path)
     return nothing
 end
 
 """
-    remove_socket_file()
+    remove_socket_file(socket_dir::String=get_project_dir())
 
 Removes the socket file if it exists.
 """
-function remove_socket_file()
-    socket_path = get_socket_path()
+function remove_socket_file(socket_dir::String=get_project_dir())
+    socket_path = get_socket_path(socket_dir)
     ispath(socket_path) && rm(socket_path)  # Unix sockets are not regular files
     return nothing
 end
 
 """
-    check_existing_server()
+    check_existing_server(socket_dir::String=get_project_dir())
 
 Checks if an MCP server is already running. Returns true if a server is running,
 false otherwise. Cleans up stale PID/socket files if the process is dead.
 """
-function check_existing_server()
-    pid_path = get_pid_path()
-    socket_path = get_socket_path()
+function check_existing_server(socket_dir::String=get_project_dir())
+    pid_path = get_pid_path(socket_dir)
+    socket_path = get_socket_path(socket_dir)
 
     if !isfile(pid_path)
         # No PID file, clean up any orphaned socket
-        remove_socket_file()
+        remove_socket_file(socket_dir)
         return false
     end
 
@@ -95,8 +95,8 @@ function check_existing_server()
 
     if isnothing(pid)
         # Invalid PID file, clean up
-        remove_pid_file()
-        remove_socket_file()
+        remove_pid_file(socket_dir)
+        remove_socket_file(socket_dir)
         return false
     end
 
@@ -107,8 +107,8 @@ function check_existing_server()
         return true
     catch
         # Process is dead, clean up stale files
-        remove_pid_file()
-        remove_socket_file()
+        remove_pid_file(socket_dir)
+        remove_socket_file(socket_dir)
         return false
     end
 end
@@ -377,10 +377,16 @@ function repl_status_report()
     end
 end
 
-function start!(; verbose::Bool=true)
+function start!(; socket_dir::String=get_project_dir(), force::Bool=false, verbose::Bool=true)
     # Check for existing server
-    if check_existing_server()
-        error("MCP server already running. Check $(get_pid_path()) for the PID.")
+    if check_existing_server(socket_dir)
+        if force
+            # Force cleanup and restart
+            remove_pid_file(socket_dir)
+            remove_socket_file(socket_dir)
+        else
+            error("MCP server already running. Check $(get_pid_path(socket_dir)) for the PID. Use force=true to restart.")
+        end
     end
 
     SERVER[] !== nothing && stop!() # Stop existing server if running
@@ -502,11 +508,11 @@ function start!(; verbose::Bool=true)
     )
 
     # Create and start server
-    socket_path = get_socket_path()
+    socket_path = get_socket_path(socket_dir)
     SERVER[] = start_mcp_server([usage_instructions_tool, repl_tool, whitespace_tool, investigate_tool], socket_path; verbose=verbose)
 
     # Write PID file after server starts
-    write_pid_file()
+    write_pid_file(socket_dir)
 
     # Register atexit hook for cleanup
     atexit() do
@@ -540,9 +546,10 @@ end
 function stop!()
     if SERVER[] !== nothing
         println("Stop existing server...")
+        socket_dir = dirname(SERVER[].socket_path)
         stop_mcp_server(SERVER[])
         SERVER[] = nothing
-        remove_pid_file()
+        remove_pid_file(socket_dir)
         if isdefined(Base, :active_repl)
             unset_prefix!(Base.active_repl)
         end
