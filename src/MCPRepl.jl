@@ -1,11 +1,117 @@
 module MCPRepl
 
 using REPL
-using HTTP
+using Sockets
 using JSON3
+
+const SOCKET_NAME = ".mcp-repl.sock"
+const PID_NAME = ".mcp-repl.pid"
 
 include("MCPServer.jl")
 include("setup.jl")
+
+"""
+    get_project_dir()
+
+Returns the directory containing the active project (Project.toml), or pwd() as fallback.
+"""
+function get_project_dir()
+    proj = Base.active_project()
+    if !isnothing(proj) && isfile(proj)
+        return dirname(proj)
+    end
+    return pwd()
+end
+
+"""
+    get_socket_path()
+
+Returns the path to the Unix socket file in the project directory.
+"""
+function get_socket_path()
+    return joinpath(get_project_dir(), SOCKET_NAME)
+end
+
+"""
+    get_pid_path()
+
+Returns the path to the PID file in the project directory.
+"""
+function get_pid_path()
+    return joinpath(get_project_dir(), PID_NAME)
+end
+
+"""
+    write_pid_file()
+
+Writes the current process PID to the PID file.
+"""
+function write_pid_file()
+    write(get_pid_path(), string(getpid()))
+    return nothing
+end
+
+"""
+    remove_pid_file()
+
+Removes the PID file if it exists.
+"""
+function remove_pid_file()
+    pid_path = get_pid_path()
+    isfile(pid_path) && rm(pid_path)
+    return nothing
+end
+
+"""
+    remove_socket_file()
+
+Removes the socket file if it exists.
+"""
+function remove_socket_file()
+    socket_path = get_socket_path()
+    ispath(socket_path) && rm(socket_path)  # Unix sockets are not regular files
+    return nothing
+end
+
+"""
+    check_existing_server()
+
+Checks if an MCP server is already running. Returns true if a server is running,
+false otherwise. Cleans up stale PID/socket files if the process is dead.
+"""
+function check_existing_server()
+    pid_path = get_pid_path()
+    socket_path = get_socket_path()
+
+    if !isfile(pid_path)
+        # No PID file, clean up any orphaned socket
+        remove_socket_file()
+        return false
+    end
+
+    # Read PID from file
+    pid_str = strip(read(pid_path, String))
+    pid = tryparse(Int, pid_str)
+
+    if isnothing(pid)
+        # Invalid PID file, clean up
+        remove_pid_file()
+        remove_socket_file()
+        return false
+    end
+
+    # Check if process is alive (signal 0 tests existence)
+    try
+        run(pipeline(`kill -0 $pid`, stderr=devnull))
+        # Process exists, server is running
+        return true
+    catch
+        # Process is dead, clean up stale files
+        remove_pid_file()
+        remove_socket_file()
+        return false
+    end
+end
 
 struct IOBufferDisplay <: AbstractDisplay
     io::IOBuffer
@@ -47,20 +153,7 @@ function execute_repllike(str)
         str = replace(str, r"(^|\n)(import\s[^\n]*)" => s"\1@eval \2")
     end
 
-
-    # alternative approach to @eval on using/import?
-    # old_stdin = stdin
-    # redirect_stdin(devnull)
-    # try
-    #     using Optim
-    # catch e
-    #     rethrow(e)
-    # finally
-    #     redirect_stdin(old_stdin)
-    # end
-
     repl = Base.active_repl
-    # expr = Meta.parse(str)
     expr = Base.parse_input_line(str)
     backend = repl.backendref
 
@@ -99,10 +192,10 @@ function execute_repllike(str)
     # Combine captured output with display output
     display_content = String(take!(disp.io))
 
-    return captured_content*display_content
+    return captured_content * display_content
 end
 
-SERVER = Ref{Union{Nothing, MCPServer}}(nothing)
+SERVER = Ref{Union{Nothing,MCPServer}}(nothing)
 
 function repl_status_report()
     if !isdefined(Main, :Pkg)
@@ -154,7 +247,7 @@ function repl_status_report()
 
             # Parse dependencies for development packages
             deps = Pkg.dependencies()
-            dev_packages = Dict{String, String}()
+            dev_packages = Dict{String,String}()
 
             for (uuid, pkg_info) in deps
                 if pkg_info.is_direct_dep && pkg_info.is_tracking_path
@@ -284,7 +377,12 @@ function repl_status_report()
     end
 end
 
-function start!(; verbose::Bool = true)
+function start!(; verbose::Bool=true)
+    # Check for existing server
+    if check_existing_server()
+        error("MCP server already running. Check $(get_pid_path()) for the PID.")
+    end
+
     SERVER[] !== nothing && stop!() # Stop existing server if running
 
     usage_instructions_tool = MCPTool(
@@ -404,14 +502,25 @@ function start!(; verbose::Bool = true)
     )
 
     # Create and start server
-    SERVER[] = start_mcp_server([usage_instructions_tool, repl_tool, whitespace_tool, investigate_tool], 3000; verbose=verbose)
+    socket_path = get_socket_path()
+    SERVER[] = start_mcp_server([usage_instructions_tool, repl_tool, whitespace_tool, investigate_tool], socket_path; verbose=verbose)
+
+    # Write PID file after server starts
+    write_pid_file()
+
+    # Register atexit hook for cleanup
+    atexit() do
+        if SERVER[] !== nothing
+            stop!()
+        end
+    end
 
     if isdefined(Base, :active_repl)
         set_prefix!(Base.active_repl)
     else
         atreplinit(set_prefix!)
     end
-    nothing
+    return nothing
 end
 
 function set_prefix!(repl)
@@ -433,12 +542,14 @@ function stop!()
         println("Stop existing server...")
         stop_mcp_server(SERVER[])
         SERVER[] = nothing
+        remove_pid_file()
         if isdefined(Base, :active_repl)
-            unset_prefix!(Base.active_repl) # Reset the prompt prefix
+            unset_prefix!(Base.active_repl)
         end
     else
         println("No server running to stop.")
     end
+    return nothing
 end
 
 end #module
