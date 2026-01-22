@@ -23,6 +23,19 @@ function get_project_dir()
 end
 
 """
+    multiplexer_path()
+
+Returns the absolute path to the MCPMultiplexer.jl script.
+This is useful for configuring MCP clients that need the multiplexer script path.
+
+Example:
+    julia -e 'using MCPRepl; println(MCPRepl.multiplexer_path())'
+"""
+function multiplexer_path()
+    return joinpath(dirname(pathof(@__MODULE__)), "MCPMultiplexer.jl")
+end
+
+"""
     get_socket_path(socket_dir::String=get_project_dir())
 
 Returns the path to the Unix socket file in the specified directory.
