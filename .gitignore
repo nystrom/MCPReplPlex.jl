@@ -7,16 +7,3 @@ Manifest.toml
 
 # Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-.venv/
-venv/
-ENV/
-env/
-.eggs/
-*.egg-info/
-dist/
-build/
-*.egg

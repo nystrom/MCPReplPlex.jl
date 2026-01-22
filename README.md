@@ -35,53 +35,7 @@ pkg> dev https://github.com/hexaeder/MCPRepl.jl
 
 The MCP adapter (`julia-repl-mcp.py`) has no external dependencies and uses only Python standard library modules. Python 3.8 or later is required.
 
-#### Using uv (recommended)
-
-[uv](https://docs.astral.sh/uv/) is a fast Python package manager. If you don't have it installed:
-
-```bash
-# Install uv
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-No additional setup is needed since the adapter has no dependencies. You can run it directly:
-
-```bash
-uv run julia-repl-mcp.py
-```
-
-Or use it with MCP clients by specifying `uv run` as the command.
-
-#### Using venv
-
-If you prefer the standard Python virtual environment:
-
-```bash
-# Navigate to the repository
-cd /path/to/MCPRepl.jl
-
-# Create a virtual environment
-python3 -m venv .venv
-
-# Activate the virtual environment
-# On macOS/Linux:
-source .venv/bin/activate
-# On Windows:
-# .venv\Scripts\activate
-
-# Install dependencies (none required, but this validates the environment)
-pip install -r requirements.txt
-```
-
-After activation, you can run the adapter with:
-
-```bash
-python julia-repl-mcp.py
-```
-
-#### No virtual environment
-
-Since there are no dependencies, you can also run the adapter directly with your system Python:
+Run the adapter directly with your system Python:
 
 ```bash
 python3 julia-repl-mcp.py
@@ -111,14 +65,8 @@ Configure your MCP client to use the adapter. The adapter takes a `project_dir` 
 
 #### Claude Code
 
-Using system Python:
 ```sh
 claude mcp add julia-repl python /path/to/MCPRepl.jl/julia-repl-mcp.py
-```
-
-Or using uv:
-```sh
-claude mcp add julia-repl uv run /path/to/MCPRepl.jl/julia-repl-mcp.py
 ```
 
 Replace `/path/to/MCPRepl.jl` with the actual path to this repository.
@@ -127,25 +75,12 @@ Replace `/path/to/MCPRepl.jl` with the actual path to this repository.
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
-Using system Python:
 ```json
 {
   "mcpServers": {
     "julia-repl": {
       "command": "python",
       "args": ["/path/to/MCPRepl.jl/julia-repl-mcp.py"]
-    }
-  }
-}
-```
-
-Or using uv:
-```json
-{
-  "mcpServers": {
-    "julia-repl": {
-      "command": "uv",
-      "args": ["run", "/path/to/MCPRepl.jl/julia-repl-mcp.py"]
     }
   }
 }
@@ -155,25 +90,12 @@ Or using uv:
 
 Add to your Windsurf MCP configuration:
 
-Using system Python:
 ```json
 {
   "mcpServers": {
     "julia-repl": {
       "command": "python",
       "args": ["/path/to/MCPRepl.jl/julia-repl-mcp.py"]
-    }
-  }
-}
-```
-
-Or using uv:
-```json
-{
-  "mcpServers": {
-    "julia-repl": {
-      "command": "uv",
-      "args": ["run", "/path/to/MCPRepl.jl/julia-repl-mcp.py"]
     }
   }
 }
@@ -183,25 +105,12 @@ Or using uv:
 
 Add to `~/.config/gemini/mcp_config.json`:
 
-Using system Python:
 ```json
 {
   "mcpServers": {
     "julia-repl": {
       "command": "python",
       "args": ["/path/to/MCPRepl.jl/julia-repl-mcp.py"]
-    }
-  }
-}
-```
-
-Or using uv:
-```json
-{
-  "mcpServers": {
-    "julia-repl": {
-      "command": "uv",
-      "args": ["run", "/path/to/MCPRepl.jl/julia-repl-mcp.py"]
     }
   }
 }
