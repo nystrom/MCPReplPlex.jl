@@ -217,43 +217,6 @@ function start_mcp_server(tools::Vector{MCPTool}, socket_path::String; verbose::
     end
 
     if verbose
-        # Check MCP status and show contextual message
-        claude_status = MCPRepl.check_claude_status()
-        gemini_status = MCPRepl.check_gemini_status()
-
-        # Claude status
-        if claude_status == :configured_socket
-            println("✅ Claude: MCP server configured (Unix socket)")
-        elseif claude_status == :configured_script
-            println("✅ Claude: MCP server configured (script transport)")
-        elseif claude_status == :configured_unknown
-            println("✅ Claude: MCP server configured")
-        elseif claude_status == :claude_not_found
-            println("⚠️ Claude: Not found in PATH")
-        else
-            println("⚠️ Claude: MCP server not configured")
-        end
-
-        # Gemini status
-        if gemini_status == :configured_socket
-            println("✅ Gemini: MCP server configured (Unix socket)")
-        elseif gemini_status == :configured_script
-            println("✅ Gemini: MCP server configured (script transport)")
-        elseif gemini_status == :configured_unknown
-            println("✅ Gemini: MCP server configured")
-        elseif gemini_status == :gemini_not_found
-            println("⚠️ Gemini: Not found in PATH")
-        else
-            println("⚠️ Gemini: MCP server not configured")
-        end
-
-        # Show setup guidance if needed
-        if claude_status == :not_configured || gemini_status == :not_configured
-            println()
-            println("💡 Call MCPRepl.setup() to configure MCP servers interactively")
-        end
-
-        println()
         println("🚀 MCP Server running on $socket_path with $(length(tools)) tools")
         println()
     else

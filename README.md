@@ -30,16 +30,98 @@ pkg> dev https://github.com/hexaeder/MCPRepl.jl
 ```
 
 ## Usage
-Within Julia, call
-``` julia-repl
-julia> using MCPRepl; MCPRepl.start!()
-```
-to open the HTTP endpoints.
 
-For Claude Code, you can run the following command to make it aware of the MCP server
-```sh
-claude mcp add julia-repl http://localhost:3000 --transport http
+MCPRepl.jl uses a two-part architecture:
+1. **Julia REPL Server**: Runs in your Julia session and executes code
+2. **MCP Adapter**: Routes MCP client requests to the correct Julia server
+
+### Step 1: Start the Julia REPL Server
+
+In your Julia REPL, start the server:
+
+```julia-repl
+julia> using MCPRepl
+julia> MCPRepl.start!()
+🚀 MCP Server running on /path/to/project/.mcp-repl.sock with 3 tools
 ```
+
+This creates a Unix socket file (`.mcp-repl.sock`) in your active project directory. The socket allows MCP clients to communicate with your REPL session.
+
+### Step 2: Configure MCP Clients
+
+Configure your MCP client to use the adapter. The adapter takes a `project_dir` parameter in each tool call to locate the correct Julia server socket.
+
+#### Claude Code
+
+```sh
+claude mcp add julia-repl /path/to/MCPRepl.jl/mcp-julia-adapter
+```
+
+Replace `/path/to/MCPRepl.jl` with the actual path to this repository.
+
+#### Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "julia-repl": {
+      "command": "/path/to/MCPRepl.jl/mcp-julia-adapter",
+      "args": []
+    }
+  }
+}
+```
+
+#### Codeium (Windsurf)
+
+Add to your Windsurf MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "julia-repl": {
+      "command": "/path/to/MCPRepl.jl/mcp-julia-adapter",
+      "args": []
+    }
+  }
+}
+```
+
+#### Gemini CLI
+
+Add to `~/.config/gemini/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "julia-repl": {
+      "command": "/path/to/MCPRepl.jl/mcp-julia-adapter",
+      "args": []
+    }
+  }
+}
+```
+
+### Using the Tools
+
+Once configured, your MCP client can call these tools:
+
+- **`exec_repl(project_dir, expression)`**: Execute Julia code in the REPL
+- **`investigate_environment(project_dir)`**: Get information about packages and environment
+- **`usage_instructions(project_dir)`**: Get best practices for using the REPL
+
+The `project_dir` parameter tells the adapter where to find the Julia server socket (by walking up from that directory to find `.mcp-repl.sock`).
+
+### Example Workflow
+
+1. Start Julia in your project directory and run `MCPRepl.start!()`
+2. Ask your AI assistant to execute Julia code
+3. The assistant calls `exec_repl(project_dir="/path/to/your/project", expression="2 + 2")`
+4. The adapter finds the socket and forwards the request
+5. Your Julia REPL executes the code and returns the result
+6. Both you and the AI see the same REPL state
 
 ## Disclaimer and Security Warning
 

@@ -8,7 +8,6 @@ const SOCKET_NAME = ".mcp-repl.sock"
 const PID_NAME = ".mcp-repl.pid"
 
 include("MCPServer.jl")
-include("setup.jl")
 
 """
     get_project_dir()
