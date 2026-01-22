@@ -1,0 +1,30 @@
+[project]
+name = "julia-repl-mcp"
+version = "0.1.0"
+description = "MCP adapter for Julia REPL servers using Unix sockets"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Hans Würfel", email = "git@wuerfel.io"},
+    {name = "Nate Nystrom", email = "nate.nystrom@gmail.com"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Homepage = "https://github.com/hexaeder/MCPRepl.jl"
+Repository = "https://github.com/hexaeder/MCPRepl.jl"
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"

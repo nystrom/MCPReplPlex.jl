@@ -4,4 +4,19 @@ Manifest.toml
 # MCP server runtime files
 .mcp-repl.sock
 .mcp-repl.pid
+
+# Python
 __pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+.eggs/
+*.egg-info/
+dist/
+build/
+*.egg
