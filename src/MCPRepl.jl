@@ -8,6 +8,7 @@ const SOCKET_NAME = ".mcp-repl.sock"
 const PID_NAME = ".mcp-repl.pid"
 
 include("MCPServer.jl")
+include("MCPPlex.jl")
 
 """
     get_project_dir()
@@ -23,16 +24,30 @@ function get_project_dir()
 end
 
 """
-    multiplexer_path()
+    multiplexer_command()
 
-Returns the absolute path to the MCPMultiplexer.jl script.
-This is useful for configuring MCP clients that need the multiplexer script path.
+Returns the command to run the MCP multiplexer.
+This is useful for configuring MCP clients.
 
 Example:
-    julia -e 'using MCPRepl; println(MCPRepl.multiplexer_path())'
+    julia -e 'using MCPRepl; println(MCPRepl.multiplexer_command())'
 """
-function multiplexer_path()
-    return joinpath(dirname(pathof(@__MODULE__)), "MCPMultiplexer.jl")
+function multiplexer_command()
+    pkg_dir = dirname(dirname(pathof(@__MODULE__)))
+    return "julia --project=$(pkg_dir) -e 'using MCPRepl; MCPRepl.run_multiplexer(ARGS)' --"
+end
+
+"""
+    run_multiplexer(args::Vector{String}=ARGS)
+
+Run the MCP multiplexer with the given arguments.
+This is the entry point for the multiplexer when run as part of the MCPRepl package.
+
+Example:
+    julia -e 'using MCPRepl; MCPRepl.run_multiplexer(ARGS)' -- --transport stdio
+"""
+function run_multiplexer(args::Vector{String}=ARGS)
+    return MCPPlex.main(args)
 end
 
 """

@@ -6,7 +6,7 @@ Julia REPL servers. Each tool call specifies a project directory to locate the c
 Julia server socket.
 
 Usage:
-    julia src/MCPMultiplexer.jl [--transport stdio|http] [--port PORT]
+    julia -e 'using MCPRepl; MCPRepl.run_multiplexer(ARGS)' -- [--transport stdio|http] [--port PORT]
 
 Options:
     --transport stdio|http    Transport mode (default: stdio)
@@ -15,10 +15,11 @@ Options:
 The Julia MCP server must be running in each project directory:
     julia --project -e "using MCPRepl; MCPRepl.start!()"
 """
-module MCPMultiplexer
+module MCPPlex
 
 using JSON3
 using Sockets
+using HTTP
 
 const SOCKET_NAME = ".mcp-repl.sock"
 const PID_NAME = ".mcp-repl.pid"
@@ -465,14 +466,6 @@ Run in HTTP mode - serve HTTP requests.
 Requires HTTP.jl to be loaded.
 """
 function run_http_mode(port::Int)
-    try
-        @eval using HTTP
-    catch
-        error("HTTP.jl is required for HTTP mode. Install it with: Pkg.add(\"HTTP\")")
-    end
-
-    HTTP = @eval HTTP
-
     function handle_request(req::HTTP.Request)
         # Handle CORS preflight
         if req.method == "OPTIONS"
@@ -561,7 +554,7 @@ function print_usage()
     MCP Julia REPL Multiplexer - MCP server that forwards to Julia REPL servers
 
     Usage:
-        julia src/MCPMultiplexer.jl [options]
+        julia -e 'using MCPRepl; MCPRepl.run_multiplexer(ARGS)' -- [options]
 
     Options:
         --transport stdio|http    Transport mode (default: stdio)
@@ -574,26 +567,26 @@ function print_usage()
 end
 
 """
-    main()
+    main(args::Vector{String}=ARGS)
 
 Main entry point for the MCP Julia REPL Multiplexer.
 """
-function main()
+function main(args::Vector{String}=ARGS)
     # Parse command line arguments
     transport = "stdio"
     port = 3000
 
     i = 1
-    while i <= length(ARGS)
-        arg = ARGS[i]
+    while i <= length(args)
+        arg = args[i]
         if arg == "--transport"
             i += 1
-            if i > length(ARGS)
+            if i > length(args)
                 println(stderr, "Error: --transport requires an argument")
                 print_usage()
                 exit(1)
             end
-            transport = ARGS[i]
+            transport = args[i]
             if transport ∉ ["stdio", "http"]
                 println(stderr, "Error: --transport must be 'stdio' or 'http'")
                 print_usage()
@@ -601,13 +594,13 @@ function main()
             end
         elseif arg == "--port"
             i += 1
-            if i > length(ARGS)
+            if i > length(args)
                 println(stderr, "Error: --port requires an argument")
                 print_usage()
                 exit(1)
             end
             try
-                port = parse(Int, ARGS[i])
+                port = parse(Int, args[i])
             catch
                 println(stderr, "Error: --port must be an integer")
                 print_usage()
@@ -636,5 +629,5 @@ end # module
 
 # Run main if this file is executed as a script
 if abspath(PROGRAM_FILE) == @__FILE__
-    MCPMultiplexer.main()
+    MCPPlex.main()
 end

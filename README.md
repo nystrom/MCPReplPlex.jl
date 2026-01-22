@@ -29,11 +29,7 @@ or
 pkg> dev https://github.com/hexaeder/MCPRepl.jl
 ```
 
-The multiplexer (`src/MCPMultiplexer.jl`) requires HTTP.jl for HTTP mode. Install dependencies:
-
-```bash
-julia --project -e 'using Pkg; Pkg.instantiate()'
-```
+All dependencies (including HTTP.jl for the multiplexer's HTTP mode) are automatically installed with the package.
 
 ## Usage
 
@@ -57,25 +53,13 @@ This creates a Unix socket file (`.mcp-repl.sock`) in your active project direct
 
 Configure your MCP client to use the multiplexer. The multiplexer takes a `project_dir` parameter in each tool call to locate the correct Julia server socket.
 
-To get the multiplexer path after installing the package:
-
-```sh
-julia -e 'using MCPRepl; println(MCPRepl.multiplexer_path())'
-```
-
 #### Claude Code
 
 ```sh
-claude mcp add julia-repl julia "$(julia -e 'using MCPRepl; println(MCPRepl.multiplexer_path())')"
+claude mcp add julia-repl $(julia -e 'using MCPRepl; println(MCPRepl.multiplexer_command())')
 ```
 
 #### Claude Desktop
-
-Get the multiplexer path:
-
-```sh
-julia -e 'using MCPRepl; println(MCPRepl.multiplexer_path())'
-```
 
 Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
 
@@ -84,7 +68,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
   "mcpServers": {
     "julia-repl": {
       "command": "julia",
-      "args": ["/absolute/path/from/above/command"]
+      "args": ["-e", "using MCPRepl; MCPRepl.run_multiplexer(ARGS)", "--"]
     }
   }
 }
@@ -92,14 +76,14 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 
 #### Codeium (Windsurf)
 
-Get the multiplexer path with `julia -e 'using MCPRepl; println(MCPRepl.multiplexer_path())'`, then add to your Windsurf MCP configuration:
+Add to your Windsurf MCP configuration:
 
 ```json
 {
   "mcpServers": {
     "julia-repl": {
       "command": "julia",
-      "args": ["/absolute/path/from/above/command"]
+      "args": ["-e", "using MCPRepl; MCPRepl.run_multiplexer(ARGS)", "--"]
     }
   }
 }
@@ -107,14 +91,14 @@ Get the multiplexer path with `julia -e 'using MCPRepl; println(MCPRepl.multiple
 
 #### Gemini CLI
 
-Get the multiplexer path with `julia -e 'using MCPRepl; println(MCPRepl.multiplexer_path())'`, then add to `~/.config/gemini/mcp_config.json`:
+Add to `~/.config/gemini/mcp_config.json`:
 
 ```json
 {
   "mcpServers": {
     "julia-repl": {
       "command": "julia",
-      "args": ["/absolute/path/from/above/command"]
+      "args": ["-e", "using MCPRepl; MCPRepl.run_multiplexer(ARGS)", "--"]
     }
   }
 }
