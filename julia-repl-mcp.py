@@ -7,7 +7,7 @@ Julia REPL servers. Each tool call specifies a project directory to locate the c
 Julia server socket.
 
 Usage:
-    ./mcp-julia-adapter [options]
+    python julia-repl-mcp.py [options]
 
 Options:
     --transport stdio|http    Transport mode (default: stdio)

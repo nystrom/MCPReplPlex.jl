@@ -54,7 +54,7 @@ Configure your MCP client to use the adapter. The adapter takes a `project_dir` 
 #### Claude Code
 
 ```sh
-claude mcp add julia-repl /path/to/MCPRepl.jl/mcp-julia-adapter
+claude mcp add julia-repl python /path/to/MCPRepl.jl/julia-repl-mcp.py
 ```
 
 Replace `/path/to/MCPRepl.jl` with the actual path to this repository.
@@ -67,8 +67,8 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
 {
   "mcpServers": {
     "julia-repl": {
-      "command": "/path/to/MCPRepl.jl/mcp-julia-adapter",
-      "args": []
+      "command": "python",
+      "args": ["/path/to/MCPRepl.jl/julia-repl-mcp.py"]
     }
   }
 }
@@ -82,8 +82,8 @@ Add to your Windsurf MCP configuration:
 {
   "mcpServers": {
     "julia-repl": {
-      "command": "/path/to/MCPRepl.jl/mcp-julia-adapter",
-      "args": []
+      "command": "python",
+      "args": ["/path/to/MCPRepl.jl/julia-repl-mcp.py"]
     }
   }
 }
@@ -97,8 +97,8 @@ Add to `~/.config/gemini/mcp_config.json`:
 {
   "mcpServers": {
     "julia-repl": {
-      "command": "/path/to/MCPRepl.jl/mcp-julia-adapter",
-      "args": []
+      "command": "python",
+      "args": ["/path/to/MCPRepl.jl/julia-repl-mcp.py"]
     }
   }
 }
