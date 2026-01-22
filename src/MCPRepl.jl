@@ -1,11 +1,116 @@
 module MCPRepl
 
 using REPL
-using HTTP
+using Sockets
 using JSON3
 
+const SOCKET_NAME = ".mcp-repl.sock"
+const PID_NAME = ".mcp-repl.pid"
+
 include("MCPServer.jl")
-include("setup.jl")
+
+"""
+    get_project_dir()
+
+Returns the directory containing the active project (Project.toml), or pwd() as fallback.
+"""
+function get_project_dir()
+    proj = Base.active_project()
+    if !isnothing(proj) && isfile(proj)
+        return dirname(proj)
+    end
+    return pwd()
+end
+
+"""
+    get_socket_path(socket_dir::String=get_project_dir())
+
+Returns the path to the Unix socket file in the specified directory.
+"""
+function get_socket_path(socket_dir::String=get_project_dir())
+    return joinpath(socket_dir, SOCKET_NAME)
+end
+
+"""
+    get_pid_path(socket_dir::String=get_project_dir())
+
+Returns the path to the PID file in the specified directory.
+"""
+function get_pid_path(socket_dir::String=get_project_dir())
+    return joinpath(socket_dir, PID_NAME)
+end
+
+"""
+    write_pid_file(socket_dir::String=get_project_dir())
+
+Writes the current process PID to the PID file.
+"""
+function write_pid_file(socket_dir::String=get_project_dir())
+    write(get_pid_path(socket_dir), string(getpid()))
+    return nothing
+end
+
+"""
+    remove_pid_file(socket_dir::String=get_project_dir())
+
+Removes the PID file if it exists.
+"""
+function remove_pid_file(socket_dir::String=get_project_dir())
+    pid_path = get_pid_path(socket_dir)
+    isfile(pid_path) && rm(pid_path)
+    return nothing
+end
+
+"""
+    remove_socket_file(socket_dir::String=get_project_dir())
+
+Removes the socket file if it exists.
+"""
+function remove_socket_file(socket_dir::String=get_project_dir())
+    socket_path = get_socket_path(socket_dir)
+    ispath(socket_path) && rm(socket_path)  # Unix sockets are not regular files
+    return nothing
+end
+
+"""
+    check_existing_server(socket_dir::String=get_project_dir())
+
+Checks if an MCP server is already running. Returns true if a server is running,
+false otherwise. Cleans up stale PID/socket files if the process is dead.
+"""
+function check_existing_server(socket_dir::String=get_project_dir())
+    pid_path = get_pid_path(socket_dir)
+    socket_path = get_socket_path(socket_dir)
+
+    if !isfile(pid_path)
+        # No PID file, clean up any orphaned socket
+        remove_socket_file(socket_dir)
+        return false
+    end
+
+    # Read PID from file
+    pid_str = strip(read(pid_path, String))
+    pid = tryparse(Int, pid_str)
+
+    if isnothing(pid)
+        # Invalid PID file, clean up
+        remove_pid_file(socket_dir)
+        remove_socket_file(socket_dir)
+        return false
+    end
+
+    # Check if process is alive (signal 0 tests existence)
+    try
+        run(pipeline(`kill -0 $pid`, stderr=devnull))
+        # Process exists, server is running
+        return true
+    catch
+        # Process is dead, clean up stale files
+        remove_pid_file(socket_dir)
+        remove_socket_file(socket_dir)
+        return false
+    end
+end
 
 struct IOBufferDisplay <: AbstractDisplay
     io::IOBuffer
@@ -47,20 +152,7 @@ function execute_repllike(str)
         str = replace(str, r"(^|\n)(import\s[^\n]*)" => s"\1@eval \2")
     end
 
-
-    # alternative approach to @eval on using/import?
-    # old_stdin = stdin
-    # redirect_stdin(devnull)
-    # try
-    #     using Optim
-    # catch e
-    #     rethrow(e)
-    # finally
-    #     redirect_stdin(old_stdin)
-    # end
-
     repl = Base.active_repl
-    # expr = Meta.parse(str)
     expr = Base.parse_input_line(str)
     backend = repl.backendref
 
@@ -72,7 +164,11 @@ function execute_repllike(str)
     captured_output = Pipe()
     response = redirect_stdout(captured_output) do
         redirect_stderr(captured_output) do
-            r = REPL.eval_on_backend(expr, backend)
+            r = if VERSION >= v"1.12"
+                REPL.eval_on_backend(expr, backend)
+            else
+                REPL.eval_with_backend(expr, backend)
+            end
             close(Base.pipe_writer(captured_output))
             r
         end
@@ -99,10 +195,10 @@ function execute_repllike(str)
     # Combine captured output with display output
     display_content = String(take!(disp.io))
 
-    return captured_content*display_content
+    return captured_content * display_content
 end
 
-SERVER = Ref{Union{Nothing, MCPServer}}(nothing)
+SERVER = Ref{Union{Nothing,MCPServer}}(nothing)
 
 function repl_status_report()
     if !isdefined(Main, :Pkg)
@@ -154,7 +250,7 @@ function repl_status_report()
 
             # Parse dependencies for development packages
             deps = Pkg.dependencies()
-            dev_packages = Dict{String, String}()
+            dev_packages = Dict{String,String}()
 
             for (uuid, pkg_info) in deps
                 if pkg_info.is_direct_dep && pkg_info.is_tracking_path
@@ -284,7 +380,18 @@ function repl_status_report()
     end
 end
 
-function start!(; verbose::Bool = true)
+function start!(; socket_dir::String=get_project_dir(), force::Bool=false, verbose::Bool=true)
+    # Check for existing server
+    if check_existing_server(socket_dir)
+        if force
+            # Force cleanup and restart
+            remove_pid_file(socket_dir)
+            remove_socket_file(socket_dir)
+        else
+            error("MCP server already running. Check $(get_pid_path(socket_dir)) for the PID. Use force=true to restart.")
+        end
+    end
+
     SERVER[] !== nothing && stop!() # Stop existing server if running
 
     usage_instructions_tool = MCPTool(
@@ -337,45 +444,6 @@ function start!(; verbose::Bool = true)
         end
     )
 
-    whitespace_tool = MCPTool(
-        "remove-trailing-whitespace",
-        """Remove trailing whitespace from all lines in a file.
-
-        This tool should be called to clean up any trailing spaces that AI agents tend to leave in files after editing.
-
-        **Usage Guidelines:**
-        - For single file edits: Call immediately after editing the file
-        - For multiple file edits: Call once on each modified file at the very end, before handing back to the user
-        - Always call this tool on files you've edited to maintain clean, professional code formatting
-
-        The tool efficiently removes all types of trailing whitespace (spaces, tabs, mixed) from every line in the file.""",
-        MCPRepl.text_parameter("file_path", "Absolute path to the file to clean up"),
-        args -> begin
-            try
-                file_path = get(args, "file_path", "")
-                if isempty(file_path)
-                    return "Error: file_path parameter is required"
-                end
-
-                if !isfile(file_path)
-                    return "Error: File does not exist: $file_path"
-                end
-
-                # Use sed to remove trailing whitespace (similar to emacs delete-trailing-whitespace)
-                # This removes all trailing whitespace characters from each line
-                result = run(pipeline(`sed -i 's/[[:space:]]*$//' $file_path`, stderr=devnull))
-
-                if result.exitcode == 0
-                    return "Successfully removed trailing whitespace from $file_path"
-                else
-                    return "Error: Failed to remove trailing whitespace from $file_path"
-                end
-            catch e
-                return "Error removing trailing whitespace: $e"
-            end
-        end
-    )
-
     investigate_tool = MCPTool(
         "investigate_environment",
         """Investigate the current Julia environment including pwd, active project, packages, and development packages with their paths.
@@ -404,14 +472,25 @@ function start!(; verbose::Bool = true)
     )
 
     # Create and start server
-    SERVER[] = start_mcp_server([usage_instructions_tool, repl_tool, whitespace_tool, investigate_tool], 3000; verbose=verbose)
+    socket_path = get_socket_path(socket_dir)
+    SERVER[] = start_mcp_server([usage_instructions_tool, repl_tool, investigate_tool], socket_path; verbose=verbose)
+
+    # Write PID file after server starts
+    write_pid_file(socket_dir)
+
+    # Register atexit hook for cleanup
+    atexit() do
+        if SERVER[] !== nothing
+            stop!()
+        end
+    end
 
     if isdefined(Base, :active_repl)
         set_prefix!(Base.active_repl)
     else
         atreplinit(set_prefix!)
     end
-    nothing
+    return nothing
 end
 
 function set_prefix!(repl)
@@ -431,14 +510,17 @@ end
 function stop!()
     if SERVER[] !== nothing
         println("Stop existing server...")
+        socket_dir = dirname(SERVER[].socket_path)
         stop_mcp_server(SERVER[])
         SERVER[] = nothing
+        remove_pid_file(socket_dir)
         if isdefined(Base, :active_repl)
-            unset_prefix!(Base.active_repl) # Reset the prompt prefix
+            unset_prefix!(Base.active_repl)
         end
     else
         println("No server running to stop.")
     end
+    return nothing
 end
 
 end #module

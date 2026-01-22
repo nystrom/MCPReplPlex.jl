@@ -1,0 +1,9 @@
+# Julia manifest
+Manifest.toml
+
+# MCP server runtime files
+.mcp-repl.sock
+.mcp-repl.pid
+
+# Python
+__pycache__/
