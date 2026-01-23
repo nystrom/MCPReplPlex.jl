@@ -116,41 +116,54 @@ function with_timeout(f, timeout::Float64)
 end
 
 """
-    send_to_julia_server(socket_path::String, request::Dict) -> Dict
+    send_to_julia_server_async(socket_path::String, request::Dict{String,Any}) -> Task
 
-Send a JSON-RPC request to the Julia server and return the response.
+Send a JSON-RPC request to the Julia server asynchronously.
+Returns a Task that yields the response Dict when complete.
 Includes connection and read timeouts.
 """
-function send_to_julia_server(socket_path::String, request::Dict)
-    try
-        sock = with_timeout(SOCKET_TIMEOUT) do
-            connect(socket_path)
-        end
+function send_to_julia_server_async(socket_path::String, request::Dict{String,Any})
+    return @async begin
+        try
+            sock = with_timeout(SOCKET_TIMEOUT) do
+                connect(socket_path)
+            end
 
-        # Send request
-        println(sock, JSON3.write(request))
+            # Send request
+            println(sock, JSON3.write(request))
 
-        # Read response
-        response_line = with_timeout(SOCKET_TIMEOUT) do
-            readline(sock)
-        end
+            # Read response
+            response_line = with_timeout(SOCKET_TIMEOUT) do
+                readline(sock)
+            end
 
-        if isempty(response_line)
+            if isempty(response_line)
+                close(sock)
+                error("Server closed connection")
+            end
+
+            response = JSON3.read(response_line, Dict{String,Any})
             close(sock)
-            error("Server closed connection")
-        end
 
-        response = JSON3.read(response_line, Dict{String,Any})
-        close(sock)
-
-        return response
-    catch e
-        if e isa Base.IOError || e isa SystemError
-            error("Socket error: $e. Is the Julia MCP server running?")
-        else
-            rethrow(e)
+            return response
+        catch e
+            if e isa Base.IOError || e isa SystemError
+                error("Socket error: $e. Is the Julia MCP server running?")
+            else
+                rethrow(e)
+            end
         end
     end
+end
+
+"""
+    send_to_julia_server(socket_path::String, request::Dict{String,Any}) -> Dict
+
+Send a JSON-RPC request to the Julia server synchronously.
+This is a convenience wrapper around send_to_julia_server_async.
+"""
+function send_to_julia_server(socket_path::String, request::Dict{String,Any})
+    return fetch(send_to_julia_server_async(socket_path, request))
 end
 
 """
@@ -183,54 +196,67 @@ function create_success_response(request_id, result)
 end
 
 """
+    forward_to_julia_server_async(tool_name::String, project_dir::String, tool_args::Dict{String,Any}, include_startup_msg::Bool=false) -> Task
+
+Forward a tool call to the Julia server identified by project_dir asynchronously.
+Returns a Task that yields the result text or error message when complete.
+"""
+function forward_to_julia_server_async(tool_name::String, project_dir::String, tool_args::Dict{String,Any}, include_startup_msg::Bool=false)
+    return @async begin
+        socket_path = find_socket_path(project_dir)
+        if isnothing(socket_path)
+            msg = "Error: MCP REPL server not found in $project_dir"
+            if include_startup_msg
+                msg *= ". Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
+            end
+            return msg
+        end
+
+        if !check_server_running(socket_path)
+            msg = "Error: MCP REPL server not running"
+            if include_startup_msg
+                msg *= " (socket exists but process dead). Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
+            end
+            return msg
+        end
+
+        julia_request = Dict(
+            "jsonrpc" => "2.0",
+            "id" => 1,
+            "method" => "tools/call",
+            "params" => Dict(
+                "name" => tool_name,
+                "arguments" => tool_args
+            )
+        )
+
+        try
+            response = fetch(send_to_julia_server_async(socket_path, julia_request))
+            if haskey(response, "error")
+                return "Error from Julia server: $(response["error"]["message"])"
+            end
+            if haskey(response, "result") && haskey(response["result"], "content")
+                content = response["result"]["content"]
+                if content isa Vector && length(content) > 0
+                    return get(content[1], "text", "")
+                end
+            end
+            return string(get(response, "result", ""))
+        catch e
+            return "Error communicating with Julia server: $e"
+        end
+    end
+end
+
+"""
     forward_to_julia_server(tool_name::String, project_dir::String, tool_args::Dict{String,Any}, include_startup_msg::Bool=false) -> String
 
 Forward a tool call to the Julia server identified by project_dir.
 Returns the result text or an error message.
+This is a synchronous wrapper around forward_to_julia_server_async.
 """
 function forward_to_julia_server(tool_name::String, project_dir::String, tool_args::Dict{String,Any}, include_startup_msg::Bool=false)
-    socket_path = find_socket_path(project_dir)
-    if isnothing(socket_path)
-        msg = "Error: MCP REPL server not found in $project_dir"
-        if include_startup_msg
-            msg *= ". Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
-        end
-        return msg
-    end
-
-    if !check_server_running(socket_path)
-        msg = "Error: MCP REPL server not running"
-        if include_startup_msg
-            msg *= " (socket exists but process dead). Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
-        end
-        return msg
-    end
-
-    julia_request = Dict(
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tools/call",
-        "params" => Dict(
-            "name" => tool_name,
-            "arguments" => tool_args
-        )
-    )
-
-    try
-        response = send_to_julia_server(socket_path, julia_request)
-        if haskey(response, "error")
-            return "Error from Julia server: $(response["error"]["message"])"
-        end
-        if haskey(response, "result") && haskey(response["result"], "content")
-            content = response["result"]["content"]
-            if content isa Vector && length(content) > 0
-                return get(content[1], "text", "")
-            end
-        end
-        return string(get(response, "result", ""))
-    catch e
-        return "Error communicating with Julia server: $e"
-    end
+    return fetch(forward_to_julia_server_async(tool_name, project_dir, tool_args, include_startup_msg))
 end
 
 """
@@ -429,31 +455,56 @@ end
     run_stdio_mode()
 
 Run in stdio mode - read from stdin, write to stdout.
+Processes requests asynchronously for better concurrency.
 """
 function run_stdio_mode()
-    while !eof(stdin)
-        line = readline(stdin)
-        isempty(line) && continue
+    output_lock = ReentrantLock()
+    active_tasks = Task[]
 
-        try
-            request = JSON3.read(line, Dict{String,Any})
-            response = process_mcp_request(request)
+    try
+        while !eof(stdin)
+            line = readline(stdin)
+            isempty(line) && continue
 
-            # Only send response if not a notification
-            if !isnothing(response)
-                println(stdout, JSON3.write(response))
-                flush(stdout)
+            # Process each request in a separate task
+            task = @async begin
+                try
+                    request = JSON3.read(line, Dict{String,Any})
+                    response = process_mcp_request(request)
+
+                    # Only send response if not a notification
+                    if !isnothing(response)
+                        lock(output_lock) do
+                            println(stdout, JSON3.write(response))
+                            flush(stdout)
+                        end
+                    end
+
+                catch e
+                    local error_response
+                    if e isa JSON3.Error
+                        error_response = create_error_response(nothing, -32700, "Parse error: $e")
+                    else
+                        error_response = create_error_response(nothing, -32603, "Internal error: $e")
+                    end
+                    lock(output_lock) do
+                        println(stdout, JSON3.write(error_response))
+                        flush(stdout)
+                    end
+                end
             end
 
-        catch e
-            if e isa JSON3.Error
-                error_response = create_error_response(nothing, -32700, "Parse error: $e")
-                println(stdout, JSON3.write(error_response))
-                flush(stdout)
-            else
-                error_response = create_error_response(nothing, -32603, "Internal error: $e")
-                println(stdout, JSON3.write(error_response))
-                flush(stdout)
+            push!(active_tasks, task)
+
+            # Clean up completed tasks periodically
+            filter!(t -> !istaskdone(t), active_tasks)
+        end
+    finally
+        # Wait for all active tasks to complete
+        for task in active_tasks
+            try
+                wait(task)
+            catch
             end
         end
     end
