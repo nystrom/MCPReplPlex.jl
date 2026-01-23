@@ -17,31 +17,50 @@ The Julia MCP server must be running in each project directory:
 """
 module MCPPlex
 
+using ArgParse
 using JSON3
 using Sockets
 using HTTP
 
 const SOCKET_NAME = ".mcp-repl.sock"
 const PID_NAME = ".mcp-repl.pid"
+const MCP_PROTOCOL_VERSION = "2024-11-05"
+
+const SOCKET_CACHE = Dict{String,Tuple{Union{String,Nothing},Float64}}()
+const SOCKET_CACHE_TTL = 10.0
 
 """
     find_socket_path(start_dir::String) -> Union{String,Nothing}
 
 Walk up the directory tree from start_dir looking for .mcp-repl.sock.
 Returns the socket path if found, nothing otherwise.
+
+Results are cached with a TTL to avoid repeated directory traversals.
 """
 function find_socket_path(start_dir::String)
     current = abspath(start_dir)
+
+    now = time()
+    if haskey(SOCKET_CACHE, current)
+        cached_path, cached_time = SOCKET_CACHE[current]
+        if now - cached_time < SOCKET_CACHE_TTL
+            return cached_path
+        end
+    end
+
+    search_dir = current
     while true
-        socket_path = joinpath(current, SOCKET_NAME)
+        socket_path = joinpath(search_dir, SOCKET_NAME)
         if ispath(socket_path)
+            SOCKET_CACHE[current] = (socket_path, now)
             return socket_path
         end
-        parent = dirname(current)
-        if parent == current
+        parent = dirname(search_dir)
+        if parent == search_dir
+            SOCKET_CACHE[current] = (nothing, now)
             return nothing
         end
-        current = parent
+        search_dir = parent
     end
 end
 
@@ -61,10 +80,38 @@ function check_server_running(socket_path::String)
     try
         pid = parse(Int, strip(read(pid_path, String)))
         # Check if process exists (Unix systems)
-        run(pipeline(`kill -0 $pid`, stderr=devnull), wait=false)
-        return true
+        return success(pipeline(`kill -0 $pid`, stderr=devnull))
     catch
         return false
+    end
+end
+
+const SOCKET_TIMEOUT = 30.0
+
+"""
+    with_timeout(f, timeout::Float64)
+
+Execute function f with a timeout. Throws ErrorException if timeout is exceeded.
+"""
+function with_timeout(f, timeout::Float64)
+    task = @async f()
+    timer = Timer(timeout)
+
+    try
+        while !istaskdone(task)
+            if !isopen(timer)
+                try
+                    Base.throwto(task, ErrorException("Operation timed out after $timeout seconds"))
+                catch
+                end
+                wait(task)
+                error("Operation timed out after $timeout seconds")
+            end
+            sleep(0.01)
+        end
+        return fetch(task)
+    finally
+        close(timer)
     end
 end
 
@@ -72,16 +119,22 @@ end
     send_to_julia_server(socket_path::String, request::Dict) -> Dict
 
 Send a JSON-RPC request to the Julia server and return the response.
+Includes connection and read timeouts.
 """
 function send_to_julia_server(socket_path::String, request::Dict)
     try
-        sock = connect(socket_path)
+        sock = with_timeout(SOCKET_TIMEOUT) do
+            connect(socket_path)
+        end
 
         # Send request
         println(sock, JSON3.write(request))
 
         # Read response
-        response_line = readline(sock)
+        response_line = with_timeout(SOCKET_TIMEOUT) do
+            readline(sock)
+        end
+
         if isempty(response_line)
             close(sock)
             error("Server closed connection")
@@ -130,12 +183,63 @@ function create_success_response(request_id, result)
 end
 
 """
-    handle_exec_repl(args::Dict) -> String
+    forward_to_julia_server(tool_name::String, project_dir::String, tool_args::Dict{String,Any}, include_startup_msg::Bool=false) -> String
+
+Forward a tool call to the Julia server identified by project_dir.
+Returns the result text or an error message.
+"""
+function forward_to_julia_server(tool_name::String, project_dir::String, tool_args::Dict{String,Any}, include_startup_msg::Bool=false)
+    socket_path = find_socket_path(project_dir)
+    if isnothing(socket_path)
+        msg = "Error: MCP REPL server not found in $project_dir"
+        if include_startup_msg
+            msg *= ". Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
+        end
+        return msg
+    end
+
+    if !check_server_running(socket_path)
+        msg = "Error: MCP REPL server not running"
+        if include_startup_msg
+            msg *= " (socket exists but process dead). Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
+        end
+        return msg
+    end
+
+    julia_request = Dict(
+        "jsonrpc" => "2.0",
+        "id" => 1,
+        "method" => "tools/call",
+        "params" => Dict(
+            "name" => tool_name,
+            "arguments" => tool_args
+        )
+    )
+
+    try
+        response = send_to_julia_server(socket_path, julia_request)
+        if haskey(response, "error")
+            return "Error from Julia server: $(response["error"]["message"])"
+        end
+        if haskey(response, "result") && haskey(response["result"], "content")
+            content = response["result"]["content"]
+            if content isa Vector && length(content) > 0
+                return get(content[1], "text", "")
+            end
+        end
+        return string(get(response, "result", ""))
+    catch e
+        return "Error communicating with Julia server: $e"
+    end
+end
+
+"""
+    handle_exec_repl(args::Dict{String,Any}) -> String
 
 Handle exec_repl tool call.
 Takes project_dir and expression, forwards to Julia server.
 """
-function handle_exec_repl(args::Dict)
+function handle_exec_repl(args::Dict{String,Any})
     project_dir = get(args, "project_dir", "")
     expression = get(args, "expression", "")
 
@@ -147,143 +251,39 @@ function handle_exec_repl(args::Dict)
         return "Error: expression parameter is required"
     end
 
-    # Find socket
-    socket_path = find_socket_path(project_dir)
-    if isnothing(socket_path)
-        return "Error: MCP REPL server not found in $project_dir. Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
-    end
-
-    if !check_server_running(socket_path)
-        return "Error: MCP REPL server not running (socket exists but process dead). Start the server with:\n  julia --project -e 'using MCPRepl; MCPRepl.start!()'"
-    end
-
-    # Forward to Julia server's exec_repl tool
-    julia_request = Dict(
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tools/call",
-        "params" => Dict(
-            "name" => "exec_repl",
-            "arguments" => Dict(
-                "expression" => expression
-            )
-        )
-    )
-
-    try
-        response = send_to_julia_server(socket_path, julia_request)
-        if haskey(response, "error")
-            return "Error from Julia server: $(response["error"]["message"])"
-        end
-        if haskey(response, "result") && haskey(response["result"], "content")
-            # Extract text from MCP response
-            content = response["result"]["content"]
-            if content isa Vector && length(content) > 0
-                return get(content[1], "text", "")
-            end
-        end
-        return string(get(response, "result", ""))
-    catch e
-        return "Error communicating with Julia server: $e"
-    end
+    return forward_to_julia_server("exec_repl", project_dir, Dict("expression" => expression), true)
 end
 
 """
-    handle_investigate_environment(args::Dict) -> String
+    handle_investigate_environment(args::Dict{String,Any}) -> String
 
 Handle investigate_environment tool call.
 Takes project_dir, forwards to Julia server.
 """
-function handle_investigate_environment(args::Dict)
+function handle_investigate_environment(args::Dict{String,Any})
     project_dir = get(args, "project_dir", "")
 
     if isempty(project_dir)
         return "Error: project_dir parameter is required"
     end
 
-    socket_path = find_socket_path(project_dir)
-    if isnothing(socket_path)
-        return "Error: MCP REPL server not found in $project_dir"
-    end
-
-    if !check_server_running(socket_path)
-        return "Error: MCP REPL server not running"
-    end
-
-    julia_request = Dict(
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tools/call",
-        "params" => Dict(
-            "name" => "investigate_environment",
-            "arguments" => Dict()
-        )
-    )
-
-    try
-        response = send_to_julia_server(socket_path, julia_request)
-        if haskey(response, "error")
-            return "Error from Julia server: $(response["error"]["message"])"
-        end
-        if haskey(response, "result") && haskey(response["result"], "content")
-            content = response["result"]["content"]
-            if content isa Vector && length(content) > 0
-                return get(content[1], "text", "")
-            end
-        end
-        return string(get(response, "result", ""))
-    catch e
-        return "Error communicating with Julia server: $e"
-    end
+    return forward_to_julia_server("investigate_environment", project_dir, Dict(), false)
 end
 
 """
-    handle_usage_instructions(args::Dict) -> String
+    handle_usage_instructions(args::Dict{String,Any}) -> String
 
 Handle usage_instructions tool call.
 Takes project_dir, forwards to Julia server.
 """
-function handle_usage_instructions(args::Dict)
+function handle_usage_instructions(args::Dict{String,Any})
     project_dir = get(args, "project_dir", "")
 
     if isempty(project_dir)
         return "Error: project_dir parameter is required"
     end
 
-    socket_path = find_socket_path(project_dir)
-    if isnothing(socket_path)
-        return "Error: MCP REPL server not found in $project_dir"
-    end
-
-    if !check_server_running(socket_path)
-        return "Error: MCP REPL server not running"
-    end
-
-    julia_request = Dict(
-        "jsonrpc" => "2.0",
-        "id" => 1,
-        "method" => "tools/call",
-        "params" => Dict(
-            "name" => "usage_instructions",
-            "arguments" => Dict()
-        )
-    )
-
-    try
-        response = send_to_julia_server(socket_path, julia_request)
-        if haskey(response, "error")
-            return "Error from Julia server: $(response["error"]["message"])"
-        end
-        if haskey(response, "result") && haskey(response["result"], "content")
-            content = response["result"]["content"]
-            if content isa Vector && length(content) > 0
-                return get(content[1], "text", "")
-            end
-        end
-        return string(get(response, "result", ""))
-    catch e
-        return "Error communicating with Julia server: $e"
-    end
+    return forward_to_julia_server("usage_instructions", project_dir, Dict(), false)
 end
 
 # MCP Tool definitions
@@ -365,7 +365,7 @@ function process_mcp_request(request::Dict)
     # Handle initialization
     if method == "initialize"
         return create_success_response(request_id, Dict(
-            "protocolVersion" => "2024-11-05",
+            "protocolVersion" => MCP_PROTOCOL_VERSION,
             "capabilities" => Dict(
                 "tools" => Dict()
             ),
@@ -545,25 +545,31 @@ function run_http_mode(port::Int)
 end
 
 """
-    print_usage()
+    parse_arguments(args::Vector{String}) -> Dict{String,Any}
 
-Print usage information to stderr.
+Parse command line arguments using ArgParse.
 """
-function print_usage()
-    println(stderr, """
-    MCP Julia REPL Multiplexer - MCP server that forwards to Julia REPL servers
+function parse_arguments(args::Vector{String})
+    s = ArgParseSettings(
+        prog = "julia -e 'using MCPRepl; MCPRepl.run_multiplexer(ARGS)' --",
+        description = "MCP Julia REPL Multiplexer - MCP server that forwards to Julia REPL servers",
+        epilog = "The Julia MCP server must be running in each project directory:\n  julia --project -e \"using MCPRepl; MCPRepl.start!()\"",
+        exit_after_help = false
+    )
 
-    Usage:
-        julia -e 'using MCPRepl; MCPRepl.run_multiplexer(ARGS)' -- [options]
+    @add_arg_table! s begin
+        "--transport"
+            help = "Transport mode"
+            arg_type = String
+            default = "stdio"
+            range_tester = x -> x in ["stdio", "http"]
+        "--port"
+            help = "Port for HTTP mode"
+            arg_type = Int
+            default = 3000
+    end
 
-    Options:
-        --transport stdio|http    Transport mode (default: stdio)
-        --port PORT               Port for HTTP mode (default: 3000)
-        --help, -h                Show this help message
-
-    The Julia MCP server must be running in each project directory:
-        julia --project -e "using MCPRepl; MCPRepl.start!()"
-    """)
+    return parse_args(args, s)
 end
 
 """
@@ -572,52 +578,10 @@ end
 Main entry point for the MCP Julia REPL Multiplexer.
 """
 function main(args::Vector{String}=ARGS)
-    # Parse command line arguments
-    transport = "stdio"
-    port = 3000
+    parsed_args = parse_arguments(args)
+    transport = parsed_args["transport"]
+    port = parsed_args["port"]
 
-    i = 1
-    while i <= length(args)
-        arg = args[i]
-        if arg == "--transport"
-            i += 1
-            if i > length(args)
-                println(stderr, "Error: --transport requires an argument")
-                print_usage()
-                exit(1)
-            end
-            transport = args[i]
-            if transport ∉ ["stdio", "http"]
-                println(stderr, "Error: --transport must be 'stdio' or 'http'")
-                print_usage()
-                exit(1)
-            end
-        elseif arg == "--port"
-            i += 1
-            if i > length(args)
-                println(stderr, "Error: --port requires an argument")
-                print_usage()
-                exit(1)
-            end
-            try
-                port = parse(Int, args[i])
-            catch
-                println(stderr, "Error: --port must be an integer")
-                print_usage()
-                exit(1)
-            end
-        elseif arg == "--help" || arg == "-h"
-            print_usage()
-            exit(0)
-        else
-            println(stderr, "Error: Unknown option: $arg")
-            print_usage()
-            exit(1)
-        end
-        i += 1
-    end
-
-    # Run in appropriate mode
     if transport == "stdio"
         run_stdio_mode()
     else

@@ -4,6 +4,7 @@ authors = ["Hans Würfel <git@wuerfel.io>"]
 version = "0.1.0"
 
 [deps]
+ArgParse = "c7e460c6-2fb9-53a9-8c5b-16f535851c63"
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 REPL = "3fa0cd96-eef1-5676-8a61-b3b8758bbffb"

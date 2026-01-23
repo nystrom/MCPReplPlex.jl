@@ -16,7 +16,7 @@ mutable struct MCPServer
 end
 
 # Process a JSON-RPC request and return a response Dict
-function process_jsonrpc_request(request::Dict, tools::Dict{String,MCPTool})
+function process_jsonrpc_request(request::Dict{String,Any}, tools::Dict{String,MCPTool})
     # Check if method field exists
     if !haskey(request, "method")
         return Dict(
@@ -38,7 +38,7 @@ function process_jsonrpc_request(request::Dict, tools::Dict{String,MCPTool})
             "jsonrpc" => "2.0",
             "id" => request_id,
             "result" => Dict(
-                "protocolVersion" => "2024-11-05",
+                "protocolVersion" => MCP_PROTOCOL_VERSION,
                 "capabilities" => Dict(
                     "tools" => Dict()
                 ),
@@ -124,8 +124,10 @@ function handle_client(client::IO, tools::Dict{String,MCPTool})
             line = readline(client)
             isempty(line) && continue
 
+            request_id = 0
             try
                 request = JSON3.read(line, Dict{String,Any})
+                request_id = get(request, "id", 0)
                 response = process_jsonrpc_request(request, tools)
 
                 # Only send response if not a notification
@@ -137,18 +139,7 @@ function handle_client(client::IO, tools::Dict{String,MCPTool})
                     break
                 end
 
-                # Parse error or internal error
                 printstyled("\nMCP Server error: $e\n", color=:red)
-
-                request_id = 0
-                try
-                    parsed = JSON3.read(line, Dict{String,Any})
-                    raw_id = get(parsed, "id", 0)
-                    if raw_id isa Union{String,Number}
-                        request_id = raw_id
-                    end
-                catch
-                end
 
                 error_response = Dict(
                     "jsonrpc" => "2.0",
@@ -190,6 +181,8 @@ function text_parameter(name::String, description::String, required::Bool=true)
     return schema
 end
 
+const MAX_CLIENTS = 10
+
 function start_mcp_server(tools::Vector{MCPTool}, socket_path::String; verbose::Bool=true)
     tools_dict = Dict(tool.name => tool for tool in tools)
 
@@ -204,10 +197,19 @@ function start_mcp_server(tools::Vector{MCPTool}, socket_path::String; verbose::
         while mcp_server.running
             try
                 client = accept(server)
+
+                # Clean up completed tasks before adding new one
+                filter!(t -> !istaskdone(t), mcp_server.client_tasks)
+
+                # Check client limit
+                if length(mcp_server.client_tasks) >= MAX_CLIENTS
+                    printstyled("\nMCP Server: max clients ($MAX_CLIENTS) reached, rejecting connection\n", color=:yellow)
+                    close(client)
+                    continue
+                end
+
                 task = @async handle_client(client, tools_dict)
                 push!(mcp_server.client_tasks, task)
-                # Clean up completed tasks
-                filter!(t -> !istaskdone(t), mcp_server.client_tasks)
             catch e
                 if mcp_server.running && !(e isa Base.IOError)
                     printstyled("\nMCP Server accept error: $e\n", color=:red)
